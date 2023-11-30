@@ -129,9 +129,33 @@ AS_IF([test "$enable_threads" != "no"], [
 AM_CONDITIONAL([HAVE_PTHREADS], [test "$HAVE_POSIX_THREADS" = "1"])
 
 AS_IF([test "$with_hwloc" != "no"], [
-       OPAL_CONFIG_HWLOC
-       AC_DEFINE([USE_HWLOC], [1], [If defined, hwloc will be used to assign NICs based on CPU affinity.])
-    ])
+        OPAL_VAR_SCOPE_PUSH([external_hwloc_happy internal_hwloc_happy  opal_hwloc_STATIC_LDFLAGS opal_hwloc_LIBS opal_hwloc_STATIC_LIBS])
+        OPAL_3RDPARTY_WITH([hwloc], [hwloc], [package_hwloc])
+        _OPAL_CONFIG_HWLOC_EXTERNAL(
+            [external_hwloc_happy=1
+             opal_hwloc_mode="external"
+             AC_DEFINE([USE_HWLOC], [1], [Enable hwloc. Default behavior is to automatically enable hwloc if installation can be found])],
+            [AS_IF([test -n "$with_hwloc"],
+                [AC_MSG_ERROR([Could not find viable hwloc build.])],
+                [external_hwloc_happy=0
+                 AC_MSG_WARN([Could not find viable hwloc build.])])]
+        )
+
+        OPAL_3RDPARTY_EXTRA_DIST="$OPAL_3RDPARTY_EXTRA_DIST hwloc_tarball"
+        OPAL_3RDPARTY_DISTCLEAN_DIRS="$OPAL_3RDPARTY_DISTCLEAN_DIRS hwloc_directory"
+
+        OPAL_WRAPPER_FLAGS_ADD([LDFLAGS], [${opal_hwloc_LDFLAGS}])
+        OPAL_WRAPPER_FLAGS_ADD([STATIC_LDFLAGS], [${opal_hwloc_STATIC_LDFLAGS}])
+        OPAL_WRAPPER_FLAGS_ADD([LIBS], [${opal_hwloc_LIBS}])
+        OPAL_WRAPPER_FLAGS_ADD([STATIC_LIBS], [${opal_hwloc_STATIC_LIBS}])
+        OPAL_WRAPPER_FLAGS_ADD([PC_MODULES], [${opal_hwloc_PC_MODULES}])
+
+        AC_CONFIG_COMMANDS_PRE([OPAL_CONFIG_HWLOC_INTERNAL_LIBS_HANDLER])
+
+        OPAL_SUMMARY_ADD([Miscellaneous], [hwloc], [], [$opal_hwloc_mode])
+
+        OPAL_VAR_SCOPE_POP
+        ])
 
 AS_IF([test "$enable_threads" != "no"], [
        AS_IF([test "$enable_openmp" != "no"], [
@@ -1003,7 +1027,7 @@ if test "$enable_threads" != "no"; then
 else
     echo "  Thread support: no"
 fi
-if test "$with_hwloc" != "no"; then
+if test "$opal_hwloc_mode" = "external"; then
     echo "  hwloc support:  yes"
 else
     echo "  hwloc support:  no"
