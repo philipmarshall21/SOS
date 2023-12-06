@@ -1,0 +1,3 @@
+[submodule "modules/hwloc"]
+	path = modules/hwloc
+	url = git@github.com:open-mpi/hwloc.git
