@@ -53,7 +53,7 @@ extern unsigned int shmem_internal_rand_seed;
 
 #ifdef USE_HWLOC
 #include <hwloc.h>
-extern hwloc_topology_t shmem_topology;
+extern hwloc_topology_t shmem_internal_topology;
 #endif
 
 #define SHMEM_INTERNAL_HEAP_OVERHEAD (1024*1024)
