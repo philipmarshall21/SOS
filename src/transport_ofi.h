@@ -34,6 +34,19 @@
 #include <sys/types.h>
 
 
+struct shmem_transport_ofi_ep {
+    struct fi_info *info;
+    struct fid_fabric *fabric;
+    struct fid_domain *domain;
+    struct fid_ep *ep;
+    struct fid_cq *cq;
+    struct fid_av *av;
+    struct fid_cntr *cntr;
+    struct fid_nic *nic;
+};
+extern struct shmem_transport_ofi_ep **shmem_transport_ofi_eps;
+extern size_t shmem_transport_ofi_num_eps;
+
 #if !defined(ENABLE_HARD_POLLING)
 #define ENABLE_TARGET_CNTR 1
 #else
@@ -263,23 +276,23 @@ struct shmem_transport_ctx_t {
     shmem_internal_mutex_t          lock;
 #endif
     long                            options;
-    struct fid_ep*                  ep;
-    struct fid_cntr*                put_cntr;
-    struct fid_cntr*                get_cntr;
-    struct fid_cq*                  cq;
+    struct fid_ep**                 ep;
+    struct fid_cntr**               put_cntr;
+    struct fid_cntr**               get_cntr;
+    struct fid_cq**                 cq;
 #ifdef USE_CTX_LOCK
     /* Pending cntr accesses are protected by ctx lock */
-    uint64_t                        pending_put_cntr;
-    uint64_t                        pending_get_cntr;
+    uint64_t*                       pending_put_cntr;
+    uint64_t*                       pending_get_cntr;
 #else
-    shmem_internal_cntr_t           pending_put_cntr;
-    shmem_internal_cntr_t           pending_get_cntr;
+    shmem_internal_cntr_t*          pending_put_cntr;
+    shmem_internal_cntr_t*          pending_get_cntr;
 #endif
     /* These counters are protected by the BB lock */
     uint64_t                        pending_bb_cntr;
     uint64_t                        completed_bb_cntr;
     shmem_free_list_t              *bounce_buffers;
-    int                             stx_idx;
+    int*                            stx_idx;
     struct shmem_internal_tid       tid;
     struct shmem_internal_team_t   *team;
 };
@@ -332,10 +345,13 @@ void shmem_transport_probe(void)
 #  ifdef USE_THREAD_COMPLETION
     if (0 == pthread_mutex_trylock(&shmem_transport_ofi_progress_lock)) {
 #  endif
-        struct fi_cq_entry buf;
-        int ret = fi_cq_read(shmem_transport_ofi_target_cq, &buf, 1);
-        if (ret == 1)
-            RAISE_WARN_STR("Unexpected event");
+        int ret = 0;
+        for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+            struct fi_cq_entry buf;
+            ret += fi_cq_read(/*shmem_transport_ofi_target_cq*/shmem_transport_ofi_eps[idx]->cq, &buf, 1);
+            if (ret == 1)
+                RAISE_WARN_STR("Unexpected event");
+        }
 #  ifdef USE_THREAD_COMPLETION
         pthread_mutex_unlock(&shmem_transport_ofi_progress_lock);
     }
@@ -450,10 +466,13 @@ void shmem_transport_put_quiet(shmem_transport_ctx_t* ctx)
     long poll_count = 0;
     while (poll_count < shmem_transport_ofi_put_poll_limit ||
            shmem_transport_ofi_put_poll_limit < 0) {
-        success = fi_cntr_read(ctx->put_cntr);
-        fail = fi_cntr_readerr(ctx->put_cntr);
-        cnt = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr);
-
+        success = 0;
+        cnt = 0;
+        for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+            success += fi_cntr_read(ctx->put_cntr[idx]);
+            fail += fi_cntr_readerr(ctx->put_cntr[idx]);
+            cnt += SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr[idx]);
+        }
         shmem_transport_probe();
 
         if (success < cnt && fail == 0) {
@@ -468,6 +487,7 @@ void shmem_transport_put_quiet(shmem_transport_ctx_t* ctx)
         }
         poll_count++;
     }
+    /* FIX */
     cnt_new = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr);
     do {
         cnt = cnt_new;
@@ -483,10 +503,8 @@ void shmem_transport_put_quiet(shmem_transport_ctx_t* ctx)
 static inline
 int shmem_transport_quiet(shmem_transport_ctx_t* ctx)
 {
-
     shmem_transport_put_quiet(ctx);
     shmem_transport_get_wait(ctx);
-
     return 0;
 }
 
@@ -568,11 +586,11 @@ void shmem_transport_put_scalar(shmem_transport_ctx_t* ctx, void *target, const
     shmem_internal_assert(len <= shmem_transport_ofi_max_buffered_send);
 
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
-    SHMEM_TRANSPORT_OFI_CNTR_INC(&ctx->pending_put_cntr);
+    SHMEM_TRANSPORT_OFI_CNTR_INC(&ctx->pending_put_cntr[0] /* FIX */);
 
     do {
 
-        ret = fi_inject_write(ctx->ep,
+        ret = fi_inject_write(ctx->ep[0] /* FIX */,
                               source,
                               len,
                               GET_DEST(dst),
@@ -607,10 +625,10 @@ void shmem_transport_ofi_put_large(shmem_transport_ctx_t* ctx, void *target, con
                        (size_t) (((uint8_t *) source) + len - frag_source));
         polled = 0;
 
-        SHMEM_TRANSPORT_OFI_CNTR_INC(&ctx->pending_put_cntr);
+        SHMEM_TRANSPORT_OFI_CNTR_INC(&ctx->pending_put_cntr[0]) /*FIX*/;
 
         do {
-            ret = fi_write(ctx->ep,
+            ret = fi_write(ctx->ep[0] /* FIX */,
                            frag_source, frag_len, NULL,
                            GET_DEST(dst), frag_target,
                            key, NULL);
@@ -912,10 +930,13 @@ void shmem_transport_get_wait(shmem_transport_ctx_t* ctx)
 
     while (poll_count < shmem_transport_ofi_get_poll_limit ||
            shmem_transport_ofi_get_poll_limit < 0) {
-        success = fi_cntr_read(ctx->get_cntr);
-        fail = fi_cntr_readerr(ctx->get_cntr);
-        cnt = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr);
-
+        success = 0;
+        cnt = 0;
+        for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+            success = fi_cntr_read(ctx->get_cntr[idx]);
+            fail = fi_cntr_readerr(ctx->get_cntr[idx]);
+            cnt = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr[idx]);
+        }
         shmem_transport_probe();
 
         if (success < cnt && fail == 0) {
@@ -930,6 +951,7 @@ void shmem_transport_get_wait(shmem_transport_ctx_t* ctx)
         }
         poll_count++;
     }
+    /* FIX */
     cnt_new = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr);
     do {
         cnt = cnt_new;
@@ -1087,16 +1109,16 @@ void shmem_transport_atomic(shmem_transport_ctx_t* ctx, void *target, const void
     uint64_t polled = 0;
     uint64_t key;
     uint8_t *addr;
-
+;
     shmem_transport_ofi_get_mr(target, pe, &addr, &key);
-
+;
     shmem_internal_assert(SHMEM_Dtsize[SHMEM_TRANSPORT_DTYPE(datatype)] == len);
 
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
-    SHMEM_TRANSPORT_OFI_CNTR_INC(&ctx->pending_put_cntr);
+    SHMEM_TRANSPORT_OFI_CNTR_INC(&ctx->pending_put_cntr[0] /* FIX */);
 
     do {
-        ret = fi_inject_atomic(ctx->ep,
+        ret = fi_inject_atomic(ctx->ep[0] /* FIX */,
                                source,
                                1,
                                GET_DEST(dst),
@@ -1474,9 +1496,11 @@ void shmem_transport_syncmem(void)
 static inline
 uint64_t shmem_transport_pcntr_get_issued_write(shmem_transport_ctx_t *ctx)
 {
-    uint64_t cnt;
+    uint64_t cnt = 0;
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
-    cnt = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr);
+    for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+        cnt += SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr[idx]);
+    }
     SHMEM_TRANSPORT_OFI_CTX_UNLOCK(ctx);
 
     if (ctx->options & SHMEMX_CTX_BOUNCE_BUFFER) {
@@ -1490,9 +1514,11 @@ uint64_t shmem_transport_pcntr_get_issued_write(shmem_transport_ctx_t *ctx)
 static inline
 uint64_t shmem_transport_pcntr_get_issued_read(shmem_transport_ctx_t *ctx)
 {
-    uint64_t cnt;
+    uint64_t cnt = 0;
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
-    cnt = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr);
+    for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+        cnt += SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr[idx]);
+    }
     SHMEM_TRANSPORT_OFI_CTX_UNLOCK(ctx);
     return cnt;
 }
@@ -1500,9 +1526,11 @@ uint64_t shmem_transport_pcntr_get_issued_read(shmem_transport_ctx_t *ctx)
 static inline
 uint64_t shmem_transport_pcntr_get_completed_write(shmem_transport_ctx_t *ctx)
 {
-    uint64_t cnt;
+    uint64_t cnt = 0;
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
-    cnt = fi_cntr_read(ctx->put_cntr);
+    for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+        cnt += fi_cntr_read(ctx->put_cntr[idx]);
+    }
     SHMEM_TRANSPORT_OFI_CTX_UNLOCK(ctx);
 
     if (ctx->options & SHMEMX_CTX_BOUNCE_BUFFER) {
@@ -1516,9 +1544,11 @@ uint64_t shmem_transport_pcntr_get_completed_write(shmem_transport_ctx_t *ctx)
 static inline
 uint64_t shmem_transport_pcntr_get_completed_read(shmem_transport_ctx_t *ctx)
 {
-    uint64_t cnt;
+    uint64_t cnt = 0;
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
-    cnt = fi_cntr_read(ctx->get_cntr);
+    for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+        cnt += fi_cntr_read(ctx->get_cntr[idx]);
+    }
     SHMEM_TRANSPORT_OFI_CTX_UNLOCK(ctx);
     return cnt;
 }
@@ -1548,6 +1578,8 @@ void shmem_transport_pcntr_get_all(shmem_transport_ctx_t *ctx, shmemx_pcntr_t *p
     SHMEM_TRANSPORT_OFI_CTX_LOCK(ctx);
     pcntr->completed_put = 0;
     pcntr->pending_put = 0;
+    pcntr->completed_get = 0;
+    pcntr->pending_get = 0;
 
     if (ctx->options & SHMEMX_CTX_BOUNCE_BUFFER) {
         SHMEM_TRANSPORT_OFI_CTX_BB_LOCK(ctx);
@@ -1555,12 +1587,14 @@ void shmem_transport_pcntr_get_all(shmem_transport_ctx_t *ctx, shmemx_pcntr_t *p
         pcntr->pending_put = ctx->pending_bb_cntr;
         SHMEM_TRANSPORT_OFI_CTX_BB_UNLOCK(ctx);
     }
-    pcntr->completed_put += fi_cntr_read(ctx->put_cntr);
-    pcntr->completed_get = fi_cntr_read(ctx->get_cntr);
 
-    pcntr->pending_put += SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr);
-    pcntr->pending_get = SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr);
+    for (size_t idx = 0; idx < shmem_transport_ofi_num_eps; idx++) {
+        pcntr->completed_put += fi_cntr_read(ctx->put_cntr[idx]);
+        pcntr->completed_get += fi_cntr_read(ctx->get_cntr[idx]);
 
+        pcntr->pending_put += SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_put_cntr[idx]);
+        pcntr->pending_get += SHMEM_TRANSPORT_OFI_CNTR_READ(&ctx->pending_get_cntr[idx]);
+    }
     SHMEM_TRANSPORT_OFI_CTX_UNLOCK(ctx);
     pcntr->target = shmem_transport_pcntr_get_completed_target();
 }
