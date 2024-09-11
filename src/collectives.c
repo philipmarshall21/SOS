@@ -268,6 +268,8 @@ shmem_internal_sync_linear(int PE_start, int PE_stride, int PE_size, long *pSync
              i < PE_size ;
              i++, pe += PE_stride) {
             shmem_internal_put_scalar(SHMEM_CTX_DEFAULT, pSync, &one, sizeof(one), pe, nic_idx);
+            //shmem_internal_atomic(SHMEM_CTX_DEFAULT, pSync, &one, sizeof(one), pe,
+            //                 SHM_INTERNAL_SUM, SHM_INTERNAL_LONG, nic_idx);
         }
 
     } else {

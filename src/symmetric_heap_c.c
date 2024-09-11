@@ -363,7 +363,6 @@ shmem_realloc(void *ptr, size_t size)
     }
     SHMEM_MUTEX_UNLOCK(shmem_internal_mutex_alloc);
 
-    SHMEM_GET_TRANSMIT_NIC_IDX(nic_idx);
     shmem_internal_barrier_all(nic_idx);
 
     return ret;
